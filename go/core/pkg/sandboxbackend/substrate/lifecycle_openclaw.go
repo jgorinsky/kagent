@@ -73,6 +73,10 @@ func (p *Lifecycle) buildOpenClawActorStartup(ctx context.Context, ah *v1alpha2.
 		containerEnv = []corev1.EnvVar{{Name: "HOME", Value: openclaw.SubstrateActorHome}}
 	}
 	containerEnv = append(containerEnv, acpShimEnv(ah, gw.Port)...)
+	// Backend-agnostic env passthrough from the harness spec, mirroring the ACP
+	// path. Appended last so it cannot shadow HOME or the gateway port: the
+	// conversion below dedups by name and keeps the first occurrence.
+	containerEnv = append(containerEnv, ah.Spec.Env...)
 	script, err = openClawStartupScript(jsonBytes)
 	if err != nil {
 		return "", nil, err
