@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
+	"github.com/kagent-dev/kagent/go/core/pkg/sandboxbackend/openclaw"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -115,6 +117,65 @@ func TestBuildOpenClawActorStartup_WithModelConfig(t *testing.T) {
 	_, hasModels := root["models"]
 	require.False(t, hasModels, "substrate bootstrap should omit models unless ModelConfig sets an explicit baseUrl")
 	require.Contains(t, root, "agents")
+}
+
+// spec.env is documented as backend-agnostic ("injected into the harness
+// workload"), so the OpenClaw path must pass it through like the ACP path does,
+// without letting user vars shadow the built-ins the startup script relies on.
+func TestBuildOpenClawActorStartup_SpecEnvPassthrough(t *testing.T) {
+	t.Parallel()
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha2.AddToScheme(scheme))
+
+	ah := &v1alpha2.AgentHarness{
+		ObjectMeta: metav1.ObjectMeta{Name: "claw", Namespace: "kagent"},
+		Spec: v1alpha2.AgentHarnessSpec{
+			Env: []corev1.EnvVar{
+				{Name: "MY_VAR", Value: "my-value"},
+				{
+					Name: "MY_SECRET",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "user-secret"},
+							Key:                  "token",
+						},
+					},
+				},
+				// Must not win over the built-ins.
+				{Name: "HOME", Value: "/tmp/hijack"},
+				{Name: "OPENCLAW_GATEWAY_PORT", Value: "1"},
+			},
+		},
+	}
+
+	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+	p := &Lifecycle{Client: kube}
+
+	_, env, err := p.buildOpenClawActorStartup(context.Background(), ah)
+	require.NoError(t, err)
+
+	byName := map[string]atev1alpha1.EnvVar{}
+	for _, e := range env {
+		byName[e.Name] = e
+	}
+
+	require.Contains(t, byName, "MY_VAR")
+	require.NotNil(t, byName["MY_VAR"].Value)
+	require.Equal(t, "my-value", *byName["MY_VAR"].Value)
+
+	require.Contains(t, byName, "MY_SECRET")
+	require.NotNil(t, byName["MY_SECRET"].ValueFrom)
+	require.NotNil(t, byName["MY_SECRET"].ValueFrom.SecretKeyRef)
+	require.Equal(t, "user-secret", byName["MY_SECRET"].ValueFrom.SecretKeyRef.Name)
+	require.Equal(t, "token", byName["MY_SECRET"].ValueFrom.SecretKeyRef.Key)
+
+	require.NotNil(t, byName["HOME"].Value)
+	require.Equal(t, openclaw.SubstrateActorHome, *byName["HOME"].Value,
+		"spec.env must not shadow HOME")
+	require.NotNil(t, byName["OPENCLAW_GATEWAY_PORT"].Value)
+	require.Equal(t, "18789", *byName["OPENCLAW_GATEWAY_PORT"].Value,
+		"spec.env must not shadow the gateway port")
 }
 
 func TestBuildOpenClawActorStartup_WithExplicitBaseURL(t *testing.T) {
